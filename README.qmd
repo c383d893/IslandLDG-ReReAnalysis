@@ -1,0 +1,548 @@
+---
+title: ""
+format: 
+  gfm:
+    fig-format: png
+    fig-cap: true
+editor: visual
+crossref:
+  fig-title: '**Figure**'
+  fig-labels: arabic
+  tbl-title: '**Table**'
+  tbl-labels: arabic
+  title-delim: ":"
+---
+
+## Pichler & Hartig, 2024 - Is there a robust effect of mainland mutualism rates on species richness of oceanic islands?
+
+Reanalysis of [Delavaux et al., 2024, "Mutualisms weaken the latitudinal diversity gradient among oceanic islands"](https://www.nature.com/articles/s41586-024-07110-y)
+
+Original Repository: [https://github.com/c383d893/IslandLDG](https://github.com/c383d893/IslandLDG)
+
+Changes in the original Delavaux scripts include:
+
+-   `Myc_analyses.R`: Save data that was used to produce the world map (Figure 1b in the original manuscript)
+-   `Nfix_Analyses.R`, `Myc_Analyses.R`, and `Poll_Analyses.R`: Add Random Forest estimator for expected mutualism ratios
+-   `Nfix_Analyses.R`, `Myc_Analyses.R`, and Poll_Analyses.R: Return observed mutualism ratio on islands
+-   `Joint_Analyses.R`: Calculate observed mutualism ratio on islands (new variable called biotic.ml_obs)
+-   `Joint_Analyses.R`: Calculate predicted/corrected mutualism ratio on islands (new variable called biotic.ml_rf)
+-   `Joint_Analyses.R`: Save data that was used to calculate the effects (e.g. Figure 2c in the original manuscript)
+
+First, rerun all scripts from the original release to generate and save all necessary data.
+
+Reanalysis can be found below or as a Rscript in `2_Analyses/Reanalysis.R`:
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+library(mgcv); library(gridExtra); library(betareg); library(MASS); library(lme4); library(lmerTest); library(lsmeans); library(ggeffects); library(spdep); library(ggplot2); library(ncf); library(ape); library(sjPlot); library(gridExtra); library(MuMIn); library(tidyverse); library(maps); library(sf); library(tidyverse); library(relaimpo);library(spdep);library(randomForest);library(ggtext);library(DHARMa);library(flextable);library(viridis)
+
+
+# RAC function
+Spat.cor <- function(mod,dat, dist) {
+  coords <- cbind(dat$longitude, dat$latitude)
+  matrix.dist = as.matrix(dist(cbind(dat$longitude, dat$latitude)))
+  matrix.dist[1:10, 1:10]
+  matrix.dist.inv <- 1/matrix.dist
+  matrix.dist.inv[1:10, 1:10]
+  diag(matrix.dist.inv) <- 0
+  matrix.dist.inv[1:10, 1:10]
+  myDist = dist
+  rac <- autocov_dist(resid(mod), coords, nbs = myDist, type = "inverse", zero.policy = TRUE, style = "W", longlat = T)
+  return(rac)
+}
+
+# RAC function when locations repeat (shift latlon)
+Spat.cor.rep <- function(mod,dat, dist) {
+  coords <- cbind(dat$longitude, dat$latitude) + matrix(runif(2*nrow(dat), 0, 0.00001), nrow = nrow(dat), ncol = 2)
+  matrix.dist = as.matrix(dist(cbind(dat$longitude, dat$latitude)))
+  matrix.dist[1:10, 1:10]
+  matrix.dist.inv <- 1/matrix.dist
+  matrix.dist.inv[1:10, 1:10]
+  diag(matrix.dist.inv) <- 0
+  matrix.dist.inv[1:10, 1:10]
+  myDist = dist
+  rac <- autocov_dist(resid(mod), coords, nbs = myDist, type = "inverse", zero.policy = TRUE, style = "W", longlat = T)
+  return(rac)
+}
+
+
+set_flextable_defaults(
+  font.size = 8, theme_fun = theme_vanilla)
+
+knitr::opts_chunk$set(fig.path="figures/", echo = FALSE)
+```
+
+### Predictive performance of the models
+
+```{r}
+#| label: tbl-performance
+#| tbl-cap: "R^2^ of Random Forest (latitude and longitude) and of GAM (spline on latitude)"
+#| warning: false
+#| message: false
+#| echo: false
+# generated in the "Joint_Analyses.R" script
+dat = readRDS("data/reanalysis_data.RDS")
+
+# remove "scale" attributes 
+dat$biotic.ml = as.numeric(dat$biotic.ml) 
+dat$biotic.ml_rf = as.numeric(dat$biotic.ml_rf) 
+# Rsquareds for RF and the original GAMs 
+r2_RF_Myc = readRDS("data/r2_RF_Myc.RDS")
+r2_RF_Nfix = readRDS("data/r2_RF_Nfix.RDS")
+r2_RF_Poll = readRDS("data/r2_RF_Poll.RDS")
+results_random_forest = 
+  rbind(r2_RF_Myc, r2_RF_Nfix, r2_RF_Poll)
+colnames(results_random_forest)[1] = "Mutualism_type"
+
+# Average R2 for RF and GAM for the mutualism predictions, FULL == Random Forest
+results = results_random_forest[,c(1, 4, 5)]
+results = rbind(results, data.frame(Mutualism_type = "Average", 
+                                    Full = mean(results$Full), 
+                                    GAM = mean(results$GAM)))
+
+colnames(results)[2:3] = c("Random Forest (~latitude+longitude)", "GAM (~s(abslatitude))")
+flextable::flextable( results )
+```
+
+
+### Figure 1 - Predicted values and corresponding effect estimates for a multiple regression using the original and the refined definition of mutualism strength as predictor
+
+```{r}
+#| label: fig-Fig_1
+#| warning: false
+#| message: false
+#| echo: false
+#| fig-width: 26
+#| fig-height: 16
+#| fig-cap: "Predicted values and corresponding effect estimates for a multiple regression using the original and the refined definition of mutualism strength as predictor. Maps A and C show for one of the three measures of mutualism (arbuscular mycorrhizal (AM) fungi diversity) how predictions and performance changes between a GAM used by Delavaux et al. (2024) with only latitude as a predictor (A) (R2 = 0.141) and a random forest model using both longitude and latitude (R2 = 0.406). Results for the other mutualism types were similar (across all three mutualism types, average R2 increased from R2 = 0.149 to R2 = 0.389). Panels B and D show the results of using these predictions of these two alternative models in a multiple regression. Effects in panel B are based on the mutualism strength predicted with latitude only (this corresponds to the original analysis). Effects in panel D are based on mutualism strength predicted by our refined model. Note that the effect of mutualism strength on the species deficit is small and not significant.  "
+
+# Models
+## Original model 
+sprichdiff.mod <- glm(sprichdiff ~ abslatitude + area + dist + elev_range +  prec + biotic.ml, data = dat) 
+rac <- Spat.cor.rep(sprichdiff.mod, dat, 2000)
+sprichdiff.mod.rac <- glm(sprichdiff ~ abslatitude + area + dist + elev_range +  prec + rac + biotic.ml, data = dat) 
+# summary(sprichdiff.mod.rac)
+
+## Our model with the new biotic.ml_rf variable
+sprichdiff.mod_rf <- glm(sprichdiff ~ abslatitude + area + dist + elev_range +  prec + biotic.ml_rf, data = dat) 
+rac <- Spat.cor.rep(sprichdiff.mod_rf, dat, 2000)
+sprichdiff.mod_rf_rac <- glm(sprichdiff ~ abslatitude + area + dist + elev_range +  prec + rac + biotic.ml_rf, data = dat) 
+# summary(sprichdiff.mod_rf_rac)
+
+mod.dat <- summary(sprichdiff.mod.rac)$coefficients %>% as.data.frame() %>%
+  mutate(variable = rownames(.)) %>%
+  filter(! variable=="(Intercept)") %>%
+  filter(! variable=="rac") %>%
+  mutate(variable = case_when(variable=="abslatitude" ~ "Absolute latitude",
+                              variable=="area" ~ "Area", 
+                              variable=="biotic.ml" ~ "Mutualism filter strength",
+                              variable=="dist" ~ "Distance",
+                              variable=="prec" ~ "Precipitation",
+                              variable=="elev_range" ~ "Elevation range")) %>%
+  filter(!is.na(variable)) 
+
+colnames(mod.dat)<-c("est", "std.err","tval","pval", "variable")
+
+mod.dat.ordered <- mod.dat
+mod.dat.ordered$variable = fct_reorder(mod.dat$variable, mod.dat$est)
+order_effects = fct_reorder(mod.dat$variable, mod.dat$est)
+
+forest.plot_original <-
+  ggplot(data=mod.dat.ordered, aes(x=variable, y=est, ymin=est-std.err, ymax=est+std.err), fill = "coral3") +
+  geom_pointrange(alpha = 0.8, size = 2, color="coral3") + 
+  geom_hline(yintercept=0, lty=2, color='darkgrey') +  # add a dotted line at x=1 after flip
+  coord_flip() +  # flip coordinates (puts labels on y axis)
+  xlab(" ") + ylab("Effect of 1 SD of predictor \non species deficit") +
+  theme_classic(base_size = 40) +
+  theme(legend.position = 'none') +
+  #theme(legend.justification=c(1,1), legend.position=c(1,1))+
+  guides(fill = FALSE) +
+  theme(axis.text.x = element_text(size = 30), axis.text.y = element_text(angle = 0, size = 30)) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15))  + labs(tag = "B")
+
+
+mod.dat <- summary(sprichdiff.mod_rf_rac)$coefficients %>% as.data.frame() %>%
+  mutate(variable = rownames(.)) %>%
+  filter(! variable=="(Intercept)") %>%
+  filter(! variable=="rac") %>%
+  mutate(variable = case_when(variable=="abslatitude" ~ "Absolute latitude",
+                              variable=="area" ~ "Area", 
+                              variable=="biotic.ml_rf" ~ "Mutualism filter strength",
+                              variable=="dist" ~ "Distance",
+                              variable=="prec" ~ "Precipitation",
+                              variable=="elev_range" ~ "Elevation range")) %>%
+  filter(!is.na(variable)) 
+
+colnames(mod.dat)<-c("est", "std.err","tval","pval", "variable")
+mod.dat.ordered <- mod.dat
+mod.dat.ordered$variable = order_effects
+
+forest.plot_original_rf <-
+  ggplot(data=mod.dat.ordered, aes(x=variable, y=est, ymin=est-std.err, ymax=est+std.err), fill = "coral3") +
+  geom_pointrange(alpha = 0.8, size = 2, color="coral3") + 
+  geom_hline(yintercept=0, lty=2, color='darkgrey') +  # add a dotted line at x=1 after flip
+  coord_flip() +  # flip coordinates (puts labels on y axis)
+  xlab(" ") + ylab("Effect of 1 SD of predictor \non species deficit") +
+  theme_classic(base_size = 40) +
+  theme(legend.position = 'none') +
+  #theme(legend.justification=c(1,1), legend.position=c(1,1))+
+  guides(fill = FALSE) +
+  theme(axis.text.x = element_text(size = 30), axis.text.y = element_text(angle = 0, size = 30)) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15))   + labs(tag = "D")
+
+
+## Maps
+df_map = readRDS("data/data_for_map.RDS")
+
+rf = randomForest(AM~latitude+longitude, data = df_map$dat.ml, mtry = 2L, ntree = 1000L)
+gam_lat = gam(AM~s(latitude), data = df_map$dat.ml)
+dat.pred_rf = df_map$dat.ml
+dat.pred_rf$AM = predict(rf, newdata =df_map$dat.ml)
+dat.pred_gam = df_map$dat.ml
+dat.pred_gam$AM = predict(gam_lat, newdata = df_map$dat.ml)
+
+
+map_gam = 
+  ggplot()+
+  geom_polygon(data = df_map$world, aes(x = long, y = lat, group = group), fill = "gray10", alpha = 0.5) +
+  geom_point(data = dat.pred_gam, aes(x = longitude, y = latitude, color = AM, size = AM),  
+             pch = 19, alpha = 0.8, stroke = 0) +
+  scale_color_viridis(option = "D", begin = 0.15, end = 1, alpha = 0.5) +
+  scale_size_continuous(range = c(2, 7)) +
+  geom_text(aes(x = -168, y = 5, label = paste0("R^2 == ", round(r2_RF_Myc[1,]$GAM, 3))), parse = TRUE, fontface = "bold", size = 10) +
+  xlab("") + ylab ("") +
+  theme_minimal() +
+  theme(axis.line = element_blank(), axis.ticks = element_blank(), 
+        legend.position = "bottom", legend.key.width = unit(1,"cm"),
+        axis.text.x = element_blank(), axis.title.x = element_blank()) +
+  labs(color = "Predicted AM richness") +
+  guides(size = "none")  +
+  labs(tag = "A")+
+  theme(axis.text.x = element_text(size = 20), 
+        axis.text.y = element_text(angle = 45, size = 20), 
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size = 15),
+        text = element_text(size=30)) 
+
+
+map_rf = 
+  ggplot()+
+  geom_polygon(data = df_map$world, aes(x = long, y = lat, group = group), fill = "gray10", alpha = 0.5) +
+  geom_point(data = dat.pred_rf, aes(x = longitude, y = latitude, color = AM, size = AM),  
+             pch = 19, alpha = 0.8, stroke = 0) +
+  scale_color_viridis(option = "D", begin = 0.15, end = 1, alpha = 0.5) +
+  scale_size_continuous(range = c(2, 7)) +
+  geom_text(aes(x = -168, y = 5, label = paste0("R^2 == ", round(r2_RF_Myc[1,]$Full, 3))), parse = TRUE, fontface = "bold", size = 10) +
+  xlab("") + ylab ("") +
+  theme_minimal() +
+  theme(axis.line = element_blank(), axis.ticks = element_blank(), 
+        legend.position = "bottom", legend.key.width = unit(1,"cm"),
+        axis.text.x = element_blank(), axis.title.x = element_blank()) +
+  labs(color = "Predicted AM richness") +
+  guides(size = "none")  + labs(tag = "C") + 
+  theme(axis.text.x = element_text(size = 20), 
+        axis.text.y = element_text(angle = 45, size = 20), 
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size = 15),
+        text = element_text(size=30)) 
+grob <- arrangeGrob(map_gam, forest.plot_original, map_rf, forest.plot_original_rf, ncol = 2)
+# ggsave("figures/Comparison_models.png",grob, width = 26, height = 16)
+grid.arrange(grob)
+```
+
+### Figure 2 - Accounting for nonlinear effects removes the reported effect of mutualism strength for both the original and revised definition of this variable, providing additional evidence against a robust effect of mutualists on island species richness
+
+```{r}
+#| label: fig-Fig_2
+#| warning: false
+#| message: false
+#| echo: false
+#| fig-cap: "Accounting for nonlinear effects removes the reported effect of mutualism strength for both the original and revised definition of this variable, providing additional evidence against a robust effect of mutualists on island species richness. Panel A: Due to the methodological choices discussed earlier, the mutualism filter strength used in Delavaux et al. (2024) is perfectly non-linear correlated with absolute latitude. Our refined mutualism filter strength variable that is predicted using also longitude shows more variation, which reduces the confounding. Panel B: When the original model is extended with splines for all variables except for the mutualism filter strength variable, the effects of mutualism filter strength variables is non-significant, regardless of whether we use the original and the refined predictions for mutualists (Panel B, dotted lines). The figure also highlights that the black solid line, corresponding to the original effect found by Delavaux et al. (2024), is the only analysis choice that results in a significant effect, whereas either accounting for nonlinearities or using a better predictor of mutualisms results in n.s. effects. Panel C shows that there is no difference between the predicted mutualism filter strength on the mainland and the observed mutualism (filter) strength on islands (which we calculated based on the mutualism ratios observed on the islands, rather than predicted based on the mutualism ratios from the mainland), as one would expect if mutualists really had a lower chance of establishment on these islands. "
+#| fig-width: 14
+#| fig-height: 5
+# Set mean to zero (because of the effect plots), no impact on results/effects
+dat_original = dat
+dat = 
+  dat |> mutate(abslatitude = abslatitude - mean(abslatitude),
+                area = area - mean(area),
+                dist = dist - mean(dist),
+                elev_range = elev_range - mean(elev_range),
+                prec = prec - mean(prec),
+                biotic.ml = biotic.ml - mean(biotic.ml),
+                biotic.ml_rf = biotic.ml_rf - mean(biotic.ml_rf))
+
+# Model from Delavaux et al
+## Linear effect on biotic.ml
+sprichdiff.mod <- glm(sprichdiff ~ abslatitude + area + dist + elev_range +  prec + biotic.ml, data = dat) 
+rac <- Spat.cor.rep(sprichdiff.mod, dat, 2000)
+rac = rac 
+sprichdiff.mod.rac <- glm(sprichdiff ~ abslatitude + area + dist + elev_range +  prec + rac + biotic.ml, data = dat) 
+#summary(sprichdiff.mod.rac)
+
+## Splines on all terms
+sprichdiff.mod_gam <- gam(sprichdiff ~ s(abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + s(biotic.ml), data = dat) 
+rac_gam <- Spat.cor.rep(sprichdiff.mod_gam, dat, 2000)
+rac_gam = rac_gam 
+sprichdiff.mod.rac_gam <- gam(sprichdiff ~ s(abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + s(rac_gam) + s(biotic.ml), data = dat) 
+#summary(sprichdiff.mod.rac_gam)
+
+## Spline on all terms except for biotic.ml
+sprichdiff.mod_gam_linear <- gam(sprichdiff ~ s(abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + biotic.ml, data = dat) 
+rac_gam_linear <- Spat.cor.rep(sprichdiff.mod_gam_linear, dat, 2000)
+sprichdiff.mod.rac_gam_linear <- gam(sprichdiff ~ s(abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + s(rac_gam_linear) + biotic.ml, data = dat) 
+#summary(sprichdiff.mod.rac_gam_linear)
+
+
+# New models / new biotic.ml variable (based on random forest)
+## Linear effect on biotic.ml_rf
+sprichdiff.mod_rf <- glm(sprichdiff ~ abslatitude + area + dist + elev_range +  prec + biotic.ml_rf, data = dat) 
+rac_rf <- Spat.cor.rep(sprichdiff.mod_rf, dat, 2000)
+sprichdiff.mod.rac_rf <- glm(sprichdiff ~ abslatitude + area + dist + elev_range +  prec + rac_rf + biotic.ml_rf, data = dat) 
+#summary(sprichdiff.mod.rac_rf)
+
+## Splines on all terms
+sprichdiff.mod_rf_gam <- gam(sprichdiff ~ s(abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + s(biotic.ml_rf), data = dat) 
+rac_rf_gam <- Spat.cor.rep(sprichdiff.mod_rf_gam, dat, 2000)
+sprichdiff.mod.rac_rf_gam <- gam(sprichdiff ~ s(abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + s(rac_rf_gam) + s(biotic.ml_rf), data = dat) 
+
+## Spline on all terms except for biotic.ml_rf
+sprichdiff.mod_rf_gam_linear <- gam(sprichdiff ~ s(abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + biotic.ml_rf, data = dat) 
+rac_rf_gam_linear <- Spat.cor.rep(sprichdiff.mod_rf_gam_linear, dat, 2000)
+sprichdiff.mod.rac_rf_gam_linear <- gam(sprichdiff ~ s(abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + s(rac_rf_gam_linear) + biotic.ml_rf, data = dat) 
+#summary(sprichdiff.mod.rac_rf_gam_linear)
+
+
+### Figure 2 
+par(mfrow = c(1, 3))
+lwd = 1.2
+plot(dat$abslatitude, dat$biotic.ml, pch = 16, col = "#00000055", xlab = "Mutualism Filter Strength", ylab = "Absolute Latitude", las = 1, ylim = c(-3.3, 1.8))
+points(dat$abslatitude, dat$biotic.ml_rf, pch = 16, col = "#FF000075")
+legend("bottomright", col = c("black", "red"), pch = 16,, lty = 1, bty = "n",legend = c("Delavaux et. al Mutualism filter", "Our Mutualism filter") )
+text(x = -2, y = 2.1, pos = 3, labels = "A", font = 2, xpd = NA, cex = 1.5)
+
+
+plot(dat$biotic.ml, dat$sprichdiff, pch = 16, col = "#00000055", xlab = "Mutualism Filter Strength", ylab = "Species Difference", las = 1, xlim = c(-5.2, 2))
+text(x = -5.9, y = 3550, pos = 3, labels = "B", font = 2, xpd = NA, cex = 1.5)
+
+points(dat$biotic.ml_rf, dat$sprichdiff, pch = 16, col = "#FF000075")
+
+pred = predict(sprichdiff.mod, newdata = dat, type = "terms", se.fit = TRUE)
+
+polygon(c(dat$biotic.ml[order(dat$biotic.ml)], 
+          dat$biotic.ml[order(dat$biotic.ml, decreasing = TRUE)] ), 
+        c((pred$fit[,6]-pred$se.fit[,6]+coef(sprichdiff.mod)[1])[order(dat$biotic.ml)],
+          (pred$fit[,6]+pred$se.fit[,6]+coef(sprichdiff.mod)[1])[order(dat$biotic.ml, decreasing = TRUE)]  ), col = "#22222222", border = NA )
+points(dat$biotic.ml[order(dat$biotic.ml)], (pred$fit[,6]+coef(sprichdiff.mod)[1])[order(dat$biotic.ml)], type = "l", col = "black", lwd = lwd, , lty = 1)
+
+pred = predict(sprichdiff.mod_gam_linear, newdata = dat, type = "terms", se.fit = TRUE)
+polygon(c(dat$biotic.ml[order(dat$biotic.ml)], 
+          dat$biotic.ml[order(dat$biotic.ml, decreasing = TRUE)] ), 
+        c((pred$fit[,1]-pred$se.fit[,1]+coef(sprichdiff.mod_gam_linear)[1])[order(dat$biotic.ml)],
+          (pred$fit[,1]+pred$se.fit[,1]+coef(sprichdiff.mod_gam_linear)[1])[order(dat$biotic.ml, decreasing = TRUE)]  ), col = "#22222222", border = NA )
+points(dat$biotic.ml[order(dat$biotic.ml)], (pred$fit[,1]+coef(sprichdiff.mod_gam_linear)[1])[order(dat$biotic.ml)], type = "l", col = "black", lwd = lwd, , lty = 2)
+
+
+pred = predict(sprichdiff.mod_rf, newdata = dat, type = "terms", se.fit = TRUE)
+
+polygon(c(dat$biotic.ml_rf[order(dat$biotic.ml_rf)], 
+          dat$biotic.ml_rf[order(dat$biotic.ml_rf, decreasing = TRUE)] ), 
+        c((pred$fit[,6]-pred$se.fit[,6]+coef(sprichdiff.mod_rf)[1])[order(dat$biotic.ml_rf)],
+          (pred$fit[,6]+pred$se.fit[,6]+coef(sprichdiff.mod_rf)[1])[order(dat$biotic.ml_rf, decreasing = TRUE)]  ), col = "#FF000033", border = NA )
+points(dat$biotic.ml_rf[order(dat$biotic.ml_rf)], (pred$fit[,6]+coef(sprichdiff.mod_rf)[1])[order(dat$biotic.ml_rf)], type = "l", col = "red", lwd = lwd, , lty = 1)
+
+pred = predict(sprichdiff.mod_rf_gam_linear, newdata = dat, type = "terms", se.fit = TRUE)
+polygon(c(dat$biotic.ml_rf[order(dat$biotic.ml_rf)], 
+          dat$biotic.ml_rf[order(dat$biotic.ml_rf, decreasing = TRUE)] ), 
+        c((pred$fit[,1]-pred$se.fit[,1]+coef(sprichdiff.mod_rf_gam_linear)[1])[order(dat$biotic.ml_rf)],
+          (pred$fit[,1]+pred$se.fit[,1]+coef(sprichdiff.mod_rf_gam_linear)[1])[order(dat$biotic.ml_rf, decreasing = TRUE)]  ), col = "#FF000033", border = NA )
+points(dat$biotic.ml_rf[order(dat$biotic.ml_rf)], (pred$fit[,1]+coef(sprichdiff.mod_rf_gam_linear)[1])[order(dat$biotic.ml_rf)], type = "l", col = "red", lwd = lwd, , lty = 2)
+
+legend("bottomright", col = c("black", "red"), pch = 16,, lty = 1, bty = "n",legend = c("Delavaux et. al Mutualism filter", "Our Mutualism filter") )
+legend("topleft", bty = "n", legend = c("LM", "GAM"), lty = c(1, 2), col = c("black", "black"), lwd = lwd)
+
+
+
+gam_predicted = gam(biotic.ml_rf~s(abslatitude, k = 5), data = dat)
+gam_obs = gam(biotic.ml_obs~s(abslatitude, k = 5), data = dat)
+plot(dat$abslatitude, dat$biotic.ml_obs, pch = 16, col = "#00000055", ylab = "Mutualism Filter Strength", xlab = "Absolute Latitude", las = 1, ylim = c(-3.6, 1.8))
+points(dat$abslatitude, dat$biotic.ml_rf, pch = 16, col = "#FF000075")
+
+text(x = -2, y = 2.1, pos = 3, labels = "C", font = 2, xpd = NA, cex = 1.5)
+
+
+pred = predict(gam_predicted, newdata = dat, type = "terms", se.fit = TRUE)
+
+polygon(c(dat$abslatitude[order(dat$abslatitude)], 
+          dat$abslatitude[order(dat$abslatitude, decreasing = TRUE)] ), 
+        c((pred$fit[,1]-pred$se.fit[,1]+coef(gam_predicted)[1])[order(dat$abslatitude)],
+          (pred$fit[,1]+pred$se.fit[,1]+coef(gam_predicted)[1])[order(dat$abslatitude, decreasing = TRUE)]  ), col = "#FF000033", border = NA )
+points(dat$abslatitude[order(dat$abslatitude)], (pred$fit[,1]+coef(gam_predicted)[1])[order(dat$abslatitude)], type = "l", col = "red", lwd = lwd, , lty = 1)
+
+pred = predict(gam_obs, newdata = dat, type = "terms", se.fit = TRUE) # [,6]+coef(sprichdiff.mod)[1])[order(dat$biotic.ml_rf)]
+polygon(c(dat$abslatitude[order(dat$abslatitude)], 
+          dat$abslatitude[order(dat$abslatitude, decreasing = TRUE)] ), 
+        c((pred$fit[,1]-pred$se.fit[,1]+coef(gam_obs)[1])[order(dat$abslatitude)],
+          (pred$fit[,1]+pred$se.fit[,1]+coef(gam_obs)[1])[order(dat$abslatitude, decreasing = TRUE)]  ), col = "#22222222", border = NA )
+points(dat$abslatitude[order(dat$abslatitude)], (pred$fit[,1]+coef(gam_obs)[1])[order(dat$abslatitude)], type = "l", col = "black", lwd = lwd, , lty = 1)
+legend("bottomleft", col = c("black", "red"), pch = 16,, lty = 1, bty = "n",legend = c("Observed Mutualism filter", "Our Mutualism filter") )
+```
+
+### Figure S1 - Residuals diagonstic of the original model
+
+```{r}
+#| label: fig-Fig_3
+#| warning: false
+#| message: false
+#| echo: false
+#| fig-cap: "Residuals of the model by Delavaux et al. (2024). Most predictors show residuals patterns, indicating nonlinearities that could potentially lead to biased estimates in the case that predictors are nonlinearly correlated. Residuals plots were created using the DHARMa package (2022)"
+#| fig-width: 14
+#| fig-height: 10
+sprichdiff.mod <- glm(sprichdiff ~ abslatitude + area + dist + elev_range +  prec + biotic.ml, data = dat_original) 
+rac <- Spat.cor.rep(sprichdiff.mod, dat, 2000)
+rac = rac 
+sprichdiff.mod.rac <- glm(sprichdiff ~ abslatitude + area + dist + elev_range +  prec + rac + biotic.ml, data = dat_original) 
+# summary(sprichdiff.mod.rac)
+
+residuals = simulateResiduals(sprichdiff.mod.rac)
+par(mfrow = c(2, 3))
+plotResiduals(residuals, form = dat$area, rank = FALSE)
+plotResiduals(residuals, form = dat$dist, rank = FALSE)
+plotResiduals(residuals, form = dat$abslatitude, rank = FALSE)
+plotResiduals(residuals, form = dat$biotic.ml, rank = FALSE)
+plotResiduals(residuals, form = dat$elev_range, rank = FALSE)
+plotResiduals(residuals, form = rac, rank = FALSE)
+```
+
+### Figure S2 - Linear and non-linear fits of Area, Distance, and Absolute Latitud
+
+Linear and non-linear fits of Area, Distance, and Absolute Latitude based on the simple linear regression used in Delavaux et al., (2024) and on our generalized additive model.
+
+```{r}
+#| label: fig-Fig_4
+#| warning: false
+#| message: false
+#| echo: false
+#| fig-cap: "Linear and non-linear fits of Area, Distance, and Absolute Latitude based on the simple linear regression used in Delavaux et al., (2024) and on our generalized additive model."
+#| fig-width: 10
+#| fig-height: 3
+par(mfrow = c(1,3),mar = c(4, 4, 2, 1))
+lwd = 2.0
+# Area
+plot(dat$area, dat$sprichdiff, pch = 16, col = "grey", xlab = "Area", ylab = "Species Richness Difference", las = 1)
+points(dat$area[order(dat$area)], (predict(sprichdiff.mod_rf, newdata = dat, type = "terms")[,2]+coef(sprichdiff.mod_rf)[1])[order(dat$area)], type = "l", col = "black", lwd = lwd, lty = 1)
+points(dat$area[order(dat$area)], (predict(sprichdiff.mod_rf_gam, newdata = dat, type = "terms")[,2]+coef(sprichdiff.mod_rf_gam)[1])[order(dat$area)], type = "l", col = "black", lwd = lwd, lty = 2)
+legend("bottomleft", bty = "n", legend = c("LM", "GAM"), lty = c(1, 2), col = c("black", "black"), lwd = lwd)
+text(-1, y = 3680, xpd = NA, pos = 2, labels = "A", fon = 2, cex = 1.5)
+
+# Distance
+plot(dat$dist, dat$sprichdiff, pch = 16, col = "grey", xlab = "Distance", ylab = "", las = 1)
+points(dat$dist[order(dat$dist)], (predict(sprichdiff.mod_rf, newdata = dat, type = "terms")[,3]+coef(sprichdiff.mod_rf)[1])[order(dat$dist)], type = "l", col = "black", lwd = lwd, lty = 1)
+points(dat$dist[order(dat$dist)], (predict(sprichdiff.mod_rf_gam, newdata = dat, type = "terms")[,3]+coef(sprichdiff.mod_rf_gam)[1])[order(dat$dist)], type = "l", col = "black", lwd = lwd, lty = 2)
+legend("bottomleft", bty = "n", legend = c("LM", "GAM"), lty = c(1, 2), col = c("black", "black"), lwd = lwd)
+text(-1.2, y = 3680, xpd = NA, pos = 2, labels = "B", fon = 2, cex = 1.5)
+
+# Abslatitude
+plot(dat$abslatitude, dat$sprichdiff, pch = 16, col = "grey", xlab = "Abs Latitude", ylab = "", las = 1)
+points(dat$abslatitude[order(dat$abslatitude)], (predict(sprichdiff.mod_rf, newdata = dat, type = "terms")[,1]+coef(sprichdiff.mod_rf)[1])[order(dat$abslatitude)], type = "l", col = "black", lwd = lwd, lty = 1)
+points(dat$abslatitude[order(dat$abslatitude)], (predict(sprichdiff.mod_rf_gam, newdata = dat, type = "terms")[,1]+coef(sprichdiff.mod_rf_gam)[1])[order(dat$abslatitude)], type = "l", col = "black", lwd = lwd, lty = 2)
+legend("bottomleft", bty = "n", legend = c("LM", "GAM"), lty = c(1, 2), col = c("black", "black"), lwd = lwd)
+text(-1.7, y = 3680, xpd = NA, pos = 2, labels = "C", fon = 2, cex = 1.5)
+
+```
+
+### Figure S3 - Influence of non-linearity and collinearity of latitude on the biotic variable effect estimate
+
+The effect of the modelling choice of the absolute latitude variable on the effect estimate of the biotic filter strength variable.
+
+```{r}
+#| label: fig-Fig_5
+#| warning: false
+#| message: false
+#| echo: false
+#| fig-cap: "The effect of the modelling choice of the absolute latitude variable on the effect estimate of the biotic filter strength variable.  Three different ways of modelling absolute latitude were tested: no absolute latitude variable, absolute latitude as a linear effect and absolute latitude as a spline. The biotic filter strength variable was always set as a linear effect. The other variables (distance, area, elevation range, precipitation, and a spatial variable to correct for autocorrelation were set as splines). We extracted the effect estimates (bars) and their confidence intervals (red error bars) for the biotic filter strength variable interpolated by Delavaux et al. 2024 (grey) and biotic filter strength variable interpolated by random forest (black). Stars mark significant effects."
+#| fig-width: 10
+#| fig-height: 10
+results_effects = 
+  data.frame(scenario = c("no", "linear", "spline", "no", "linear", "spline"),
+             var = c(rep("Original", 3), rep("Corrected", 3)),
+             effect = rep(NA, 6),
+             se = rep(NA, 6),
+             sign = rep(NA, 6))
+
+sprichdiff.mod_gam_linear <- gam(sprichdiff ~s(area) + s(dist) + s(elev_range) +  s(prec) + biotic.ml, data = dat_original) 
+rac_gam_linear <- Spat.cor.rep(sprichdiff.mod_gam_linear, dat_original, 2000)
+sprichdiff.mod.rac_gam_linear <- gam(sprichdiff ~ s(area) + s(dist) + s(elev_range) +  s(prec) + s(rac_gam_linear) + biotic.ml, data = dat_original) 
+summ = summary(sprichdiff.mod.rac_gam_linear)
+results_effects[1,]$effect =  summ$p.coeff[2]
+results_effects[1,]$se = summ$se[2]
+results_effects[1,]$sign = summ$p.pv[2] < 0.05
+
+sprichdiff.mod_gam_linear <- gam(sprichdiff ~ (abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + biotic.ml, data = dat_original) 
+rac_gam_linear <- Spat.cor.rep(sprichdiff.mod_gam_linear, dat_original, 2000)
+sprichdiff.mod.rac_gam_linear <- gam(sprichdiff ~ (abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + s(rac_gam_linear) + biotic.ml, data = dat_original) 
+summ = summary(sprichdiff.mod.rac_gam_linear)
+results_effects[2,]$effect =  summ$p.coeff[3]
+results_effects[2,]$se = summ$se[3]
+results_effects[2,]$sign = summ$p.pv[3] < 0.05
+
+
+sprichdiff.mod_gam <- gam(sprichdiff ~ s(abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + biotic.ml, data = dat_original) 
+rac_gam <- Spat.cor.rep(sprichdiff.mod_gam, dat_original, 2000)
+rac_gam = rac_gam 
+sprichdiff.mod.rac_gam <- gam(sprichdiff ~ s(abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + s(rac_gam) + biotic.ml, data = dat_original) 
+summ = summary(sprichdiff.mod.rac_gam)
+results_effects[3,]$effect =  summ$p.coeff[2]
+results_effects[3,]$se = summ$se[2]
+results_effects[3,]$sign = summ$p.pv[2] < 0.05
+
+
+
+# New models / new biotic.ml variable (based on random forest)
+## Linear effect on biotic.ml_rf
+sprichdiff.mod_gam_linear <- gam(sprichdiff ~s(area) + s(dist) + s(elev_range) +  s(prec) + biotic.ml_rf, data = dat_original) 
+rac_gam_linear <- Spat.cor.rep(sprichdiff.mod_gam_linear, dat_original, 2000)
+sprichdiff.mod.rac_gam_linear <- gam(sprichdiff ~ s(area) + s(dist) + s(elev_range) +  s(prec) + s(rac_gam_linear) + biotic.ml_rf, data = dat_original) 
+summ = summary(sprichdiff.mod.rac_gam_linear)
+results_effects[4,]$effect =  summ$p.coeff[2]
+results_effects[4,]$se = summ$se[2]
+results_effects[4,]$sign = summ$p.pv[2] < 0.05
+
+
+sprichdiff.mod_gam_linear <- gam(sprichdiff ~ (abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + biotic.ml_rf, data = dat_original) 
+rac_gam_linear <- Spat.cor.rep(sprichdiff.mod_gam_linear, dat_original, 2000)
+sprichdiff.mod.rac_gam_linear <- gam(sprichdiff ~ (abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + s(rac_gam_linear) + biotic.ml_rf, data = dat_original) 
+summ = summary(sprichdiff.mod.rac_gam_linear)
+results_effects[5,]$effect =  summ$p.coeff[3]
+results_effects[5,]$se = summ$se[3]
+results_effects[5,]$sign = summ$p.pv[3] < 0.05
+
+
+
+sprichdiff.mod_gam <- gam(sprichdiff ~ s(abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + biotic.ml_rf, data = dat_original) 
+rac_gam <- Spat.cor.rep(sprichdiff.mod_gam, dat_original, 2000)
+rac_gam = rac_gam 
+sprichdiff.mod.rac_gam <- gam(sprichdiff ~ s(abslatitude) + s(area) + s(dist) + s(elev_range) +  s(prec) + s(rac_gam) + biotic.ml_rf, data = dat_original) 
+summ = summary(sprichdiff.mod.rac_gam)
+results_effects[6,]$effect =  summ$p.coeff[2]
+results_effects[6,]$se = summ$se[2]
+results_effects[6,]$sign = summ$p.pv[2] < 0.05
+
+
+results_effects$index = 1:6
+
+par(mfrow = c(1, 1))
+
+error.bar <- function(x, y, upper, lower=upper, length=0.1,...){
+  arrows(x,y+upper, x, y-lower, angle=90, code=3, length=length, col = "#FF0000",...)
+}
+
+bar <- barplot(results_effects$effect , beside=F , legend.text=T,col= c(rep("grey", 3), rep("black", 3)) , ylab="Biotic filter strength effect", ylim = c(-750, 750), space = c(rep(0.2, 3), 0.6, 0.2, 0.2))
+abline(h = 0)
+error.bar(bar,results_effects$effect, 1.96*results_effects$se, lwd = 2.0)
+legend("topright", legend = c("Mutualism covariate interpolated by Delavaux", "Mutualism covariate interpolated by Random Forest"), col = c("grey", "black"), pch = 15, bty = "n")
+text(bar[,1] - 0.7, y = -870, labels= rep(c("No abslatitude", "Linear abslatitude", "Spline abslatitude" ), 2), xpd = NA, pos = 4, srt = 45)
+points(x = bar[,1], y = rep(530, 6), pch = 8, col = c("white", "black")[as.integer(results_effects$sign) + 1])
+
+```
